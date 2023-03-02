@@ -34,7 +34,7 @@ public class MonitorSQLInMethodProcessor {
     @Autowired
     private ApplicationContext applicationContext;
 
-    ThreadLocal<MonitorSQLInMethodFactor> threadLocalForFactor = new ThreadLocal<>();
+
     DataSource originDataSource;
     ConcurrentHashMap<String, Object> storedMap;
     String storedDataSourceBeanName;
@@ -62,7 +62,7 @@ public class MonitorSQLInMethodProcessor {
         factor.setMethod(method.getName());
         factor.setInvokeTime(OffsetDateTime.now());
 
-        threadLocalForFactor.set(factor);
+        FactorContext.threadLocalForFactor.set(factor);
 
         long startMs = System.currentTimeMillis();
 
@@ -127,9 +127,13 @@ public class MonitorSQLInMethodProcessor {
         }
     }
 
+    public static class FactorContext{
+        public static ThreadLocal<MonitorSQLInMethodFactor> threadLocalForFactor = new ThreadLocal<>();
+    }
+
     public static class ProxyDataSource implements InvocationHandler{
 
-        private DataSource dataSource;
+        private final DataSource dataSource;
 
         public ProxyDataSource(DataSource dataSource){
             this.dataSource = dataSource;
@@ -149,7 +153,7 @@ public class MonitorSQLInMethodProcessor {
 
     public static class ProxyConnection implements InvocationHandler {
 
-        private Connection connection;
+        private final Connection connection;
 
         public ProxyConnection(Connection connection){
             this.connection = connection;
@@ -160,12 +164,19 @@ public class MonitorSQLInMethodProcessor {
 
             String methodName = method.getName();
             if("prepareStatement".equalsIgnoreCase(methodName)){
+                String sql = (String)args[0];
+                MonitorSQLInMethodFactor factor = FactorContext.threadLocalForFactor.get();
+                MonitorSQLInMethodFactor.SqlInfo sqlInfo = new MonitorSQLInMethodFactor.SqlInfo();
+                factor.getSqlInfoList().add(sqlInfo);
+
+                sqlInfo.setSql(sql);
 
                 PreparedStatement obj = (PreparedStatement)method.invoke(connection,args);
                 ProxyPrepareStatement prepareStatement = new ProxyPrepareStatement(obj);
                 return Proxy.newProxyInstance(MonitorSQLInMethodProcessor.class.getClassLoader(),new Class[]{PreparedStatement.class},prepareStatement);
             }
             if("createStatement".equalsIgnoreCase(methodName)){
+
                 Statement statement = (Statement)method.invoke(connection,args);
                 ProxyStatement proxyStatement = new ProxyStatement(statement);
                 return Proxy.newProxyInstance(MonitorSQLInMethodProcessor.class.getClassLoader(),new Class[]{Statement.class},proxyStatement);
@@ -185,6 +196,18 @@ public class MonitorSQLInMethodProcessor {
         public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
 
             String methodName = method.getName();
+            if(methodName.contains("execute")){
+                if(args.length>0){
+                    String sql = (String)args[0];
+                    MonitorSQLInMethodFactor factor = FactorContext.threadLocalForFactor.get();
+                    MonitorSQLInMethodFactor.SqlInfo sqlInfo = new MonitorSQLInMethodFactor.SqlInfo();
+                    factor.getSqlInfoList().set(0,sqlInfo);
+
+                    sqlInfo.setSql(sql);
+                }else{
+
+                }
+            }
 
             return null;
         }

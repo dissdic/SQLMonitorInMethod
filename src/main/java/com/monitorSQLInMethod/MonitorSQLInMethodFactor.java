@@ -1,6 +1,7 @@
 package com.monitorSQLInMethod;
 
 import java.time.OffsetDateTime;
+import java.util.ArrayList;
 import java.util.List;
 
 public class MonitorSQLInMethodFactor {
@@ -13,7 +14,7 @@ public class MonitorSQLInMethodFactor {
 
     private long invokeDuration;
 
-    private List<SqlInfo> sqlInfoList;
+    private List<SqlInfo> sqlInfoList = new ArrayList<>();
 
     public String getThread() {
         return thread;
