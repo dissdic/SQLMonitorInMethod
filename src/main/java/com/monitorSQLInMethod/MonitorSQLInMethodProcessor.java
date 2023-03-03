@@ -1,10 +1,12 @@
 package com.monitorSQLInMethod;
 
-import ch.qos.logback.core.pattern.FormatInfo;
 import org.aspectj.lang.ProceedingJoinPoint;
 import org.aspectj.lang.annotation.Around;
 import org.aspectj.lang.annotation.Aspect;
 import org.aspectj.lang.reflect.MethodSignature;
+import org.springframework.aop.framework.AdvisedSupport;
+import org.springframework.aop.framework.AopProxy;
+import org.springframework.aop.support.AopUtils;
 import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.support.DefaultListableBeanFactory;
@@ -13,6 +15,7 @@ import org.springframework.context.ApplicationContext;
 import org.springframework.stereotype.Component;
 
 import javax.sql.DataSource;
+import java.io.File;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
@@ -21,19 +24,19 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.Statement;
 import java.time.OffsetDateTime;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 @Aspect
 @Component
 public class MonitorSQLInMethodProcessor {
 
+    public MonitorSQLInMethodProcessor(){
+        System.out.println("init");
+    }
+
     @Autowired
     private ApplicationContext applicationContext;
-
 
     DataSource originDataSource;
     ConcurrentHashMap<String, Object> storedMap;
@@ -59,7 +62,7 @@ public class MonitorSQLInMethodProcessor {
 
         MonitorSQLInMethodFactor factor = new MonitorSQLInMethodFactor();
         factor.setThread(Thread.currentThread().getName());
-        factor.setMethod(method.getName());
+        factor.setMethod(method.getDeclaringClass().getName()+":"+method.getName());
         factor.setInvokeTime(OffsetDateTime.now());
 
         FactorContext.threadLocalForFactor.set(factor);
@@ -82,6 +85,28 @@ public class MonitorSQLInMethodProcessor {
         for (Map.Entry<Field, Object> entry : modifyFields.entrySet()) {
             entry.getKey().set(entry.getValue(), originDataSource);
         }
+        FactorContext.threadLocalForFactor.remove();
+    }
+
+    private Object getTarget(Object obj) throws Exception {
+        if(AopUtils.isAopProxy(obj)){
+            if(!AopUtils.isJdkDynamicProxy(obj)){
+                Field f = obj.getClass().getDeclaredField("CGLIB$CALLBACK_0");
+                f.setAccessible(true);
+                Object interceptor = f.get(obj);
+                Field target = interceptor.getClass().getDeclaredField("advised");
+                target.setAccessible(true);
+                return ((AdvisedSupport)target.get(interceptor)).getTargetSource().getTarget();
+            }else{
+                Field f = obj.getClass().getDeclaredField("h");
+                f.setAccessible(true);
+                AopProxy aopProxy = (AopProxy)f.get(obj);
+                Field target = aopProxy.getClass().getDeclaredField("advised");
+                target.setAccessible(true);
+                return ((AdvisedSupport)target.get(aopProxy)).getTargetSource().getTarget();
+            }
+        }
+        return obj;
     }
 
     private void dynamicReplaceDataSourceBean(DataSource dataSource) throws Exception{
@@ -105,16 +130,23 @@ public class MonitorSQLInMethodProcessor {
         singletonObjects.put(datasourceName,dataSource);
 
         for (Object value : singletonObjects.values()) {
+            if(value instanceof MonitorSQLInMethodProcessor){
+                continue;
+            }
+            //考虑代理
+            value = getTarget(value);
             Field[] fs = value.getClass().getDeclaredFields();
             for (Field f : fs) {
                 Class<?> cls = f.getType();
                 if ("DataSource".equalsIgnoreCase(cls.getSimpleName())){
+                    f.setAccessible(true);
                     f.set(value,dataSource);
                     modifyFields.put(f,value);
                 }else{
                     Class<?> superClass = cls.getSuperclass();
                     while (superClass!=null){
                         if("DataSource".equalsIgnoreCase(superClass.getSimpleName())){
+                            f.setAccessible(true);
                             f.set(value,dataSource);
                             modifyFields.put(f,value);
                             break;
@@ -167,9 +199,8 @@ public class MonitorSQLInMethodProcessor {
                 String sql = (String)args[0];
                 MonitorSQLInMethodFactor factor = FactorContext.threadLocalForFactor.get();
                 MonitorSQLInMethodFactor.SqlInfo sqlInfo = new MonitorSQLInMethodFactor.SqlInfo();
-                factor.getSqlInfoList().add(sqlInfo);
-
                 sqlInfo.setSql(sql);
+                factor.getSqlInfoList().offer(sqlInfo);
 
                 PreparedStatement obj = (PreparedStatement)method.invoke(connection,args);
                 ProxyPrepareStatement prepareStatement = new ProxyPrepareStatement(obj);
@@ -197,19 +228,35 @@ public class MonitorSQLInMethodProcessor {
 
             String methodName = method.getName();
             if(methodName.contains("execute")){
-                if(args.length>0){
+                if(args!=null && args.length>0){
                     String sql = (String)args[0];
                     MonitorSQLInMethodFactor factor = FactorContext.threadLocalForFactor.get();
                     MonitorSQLInMethodFactor.SqlInfo sqlInfo = new MonitorSQLInMethodFactor.SqlInfo();
-                    factor.getSqlInfoList().set(0,sqlInfo);
-
+                    //插到队首
+                    factor.getSqlInfoList().push(sqlInfo);
                     sqlInfo.setSql(sql);
+                    sqlInfo.setExecuteTime(OffsetDateTime.now());
+                    long startMs = System.currentTimeMillis();
+                    Object obj = method.invoke(preparedStatement,args);
+                    long stopMs = System.currentTimeMillis();
+                    sqlInfo.setMillSeconds(stopMs-startMs);
+                    return obj;
                 }else{
-
+                    MonitorSQLInMethodFactor factor = FactorContext.threadLocalForFactor.get();
+                    Deque<MonitorSQLInMethodFactor.SqlInfo> list = factor.getSqlInfoList();
+                    MonitorSQLInMethodFactor.SqlInfo info = list.peekLast();
+                    if(info!=null && info.getExecuteTime()==null){
+                        info.setExecuteTime(OffsetDateTime.now());
+                        long startMs = System.currentTimeMillis();
+                        Object obj = method.invoke(preparedStatement,args);
+                        long stopMs = System.currentTimeMillis();
+                        info.setMillSeconds(stopMs-startMs);
+                        return obj;
+                    }
                 }
             }
 
-            return null;
+            return method.invoke(preparedStatement,args);
         }
     }
 
@@ -225,7 +272,23 @@ public class MonitorSQLInMethodProcessor {
         public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
 
             String methodName = method.getName();
-            return null;
+            if(methodName.contains("execute")){
+                if(args!=null && args.length>0){
+                    String sql = (String)args[0];
+                    MonitorSQLInMethodFactor factor = FactorContext.threadLocalForFactor.get();
+                    MonitorSQLInMethodFactor.SqlInfo sqlInfo = new MonitorSQLInMethodFactor.SqlInfo();
+                    //插到队首
+                    factor.getSqlInfoList().push(sqlInfo);
+                    sqlInfo.setSql(sql);
+                    sqlInfo.setExecuteTime(OffsetDateTime.now());
+                    long startMs = System.currentTimeMillis();
+                    Object obj = method.invoke(statement,args);
+                    long stopMs = System.currentTimeMillis();
+                    sqlInfo.setMillSeconds(stopMs-startMs);
+                    return obj;
+                }
+            }
+            return method.invoke(statement,args);
         }
     }
 

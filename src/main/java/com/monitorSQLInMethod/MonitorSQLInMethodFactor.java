@@ -2,6 +2,8 @@ package com.monitorSQLInMethod;
 
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
+import java.util.Deque;
+import java.util.LinkedList;
 import java.util.List;
 
 public class MonitorSQLInMethodFactor {
@@ -14,7 +16,7 @@ public class MonitorSQLInMethodFactor {
 
     private long invokeDuration;
 
-    private List<SqlInfo> sqlInfoList = new ArrayList<>();
+    private Deque<SqlInfo> sqlInfoList = new LinkedList<>();
 
     public String getThread() {
         return thread;
@@ -48,11 +50,11 @@ public class MonitorSQLInMethodFactor {
         this.invokeTime = invokeTime;
     }
 
-    public List<SqlInfo> getSqlInfoList() {
+    public Deque<SqlInfo> getSqlInfoList() {
         return sqlInfoList;
     }
 
-    public void setSqlInfoList(List<SqlInfo> sqlInfoList) {
+    public void setSqlInfoList(Deque<SqlInfo> sqlInfoList) {
         this.sqlInfoList = sqlInfoList;
     }
 
