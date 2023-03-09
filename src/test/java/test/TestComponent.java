@@ -38,7 +38,7 @@ public class TestComponent {
         jdbcTemplate.queryForList("select * from work limit 140");
         jdbcTemplate.queryForList("select * from work limit 160");
 
-        jdbcTemplate.execute("insert into work (id) values (1119)");
+//        jdbcTemplate.execute("insert into work (id) values (1119)");
     }
 
     @MonitorSQLInMethod
