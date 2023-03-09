@@ -7,4 +7,5 @@ public class MonitorSQLInMethodEvent extends ApplicationEvent {
     public MonitorSQLInMethodEvent(MonitorSQLInMethodFactor factor) {
         super(factor);
     }
+
 }

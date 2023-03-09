@@ -16,7 +16,11 @@ import org.springframework.cglib.proxy.Enhancer;
 import org.springframework.cglib.proxy.MethodInterceptor;
 import org.springframework.cglib.proxy.MethodProxy;
 import org.springframework.context.ApplicationContext;
+import org.springframework.jdbc.datasource.ConnectionHandle;
+import org.springframework.jdbc.datasource.ConnectionHolder;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.util.ReflectionUtils;
 
 import javax.sql.DataSource;
 import java.lang.reflect.*;
@@ -24,7 +28,8 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.Statement;
 import java.time.OffsetDateTime;
-import java.util.*;
+import java.util.Collection;
+import java.util.Deque;
 import java.util.concurrent.ConcurrentHashMap;
 
 @Aspect
@@ -50,7 +55,9 @@ public class MonitorSQLInMethodProcessor {
             return point.proceed();
         }
         //替换掉
-        dynamicReplaceDataSourceBean(new ArrayList<>(cs).get(0));
+        dynamicReplaceDataSourceBean(cs);
+
+        processConnectionHandle(cs);
 
         MethodSignature method_ = (MethodSignature)point.getSignature();
         Method method = method_.getMethod();
@@ -65,6 +72,7 @@ public class MonitorSQLInMethodProcessor {
         long startMs = System.currentTimeMillis();
 
         Object obj = point.proceed();
+
         reset();
         long stopMs = System.currentTimeMillis();
         factor.setInvokeDuration(stopMs-startMs);
@@ -73,6 +81,24 @@ public class MonitorSQLInMethodProcessor {
         applicationContext.publishEvent(event);
         System.out.println("stop");
         return obj;
+    }
+
+    private void processConnectionHandle(Collection<DataSource> dataSources){
+        for (DataSource dataSource : dataSources) {
+            ConnectionHolder conHolder = (ConnectionHolder) TransactionSynchronizationManager.getResource(dataSource);
+            if(conHolder != null && conHolder.getConnectionHandle()!=null) {
+                ConnectionHandle handle = conHolder.getConnectionHandle();
+                Connection conn = handle.getConnection();
+                Connection connection = (Connection) Proxy.newProxyInstance(MonitorSQLInMethodProcessor.class.getClassLoader(),new Class<?>[]{Connection.class},new ProxyConnection(conn));
+                //反射设置
+                Field field = ReflectionUtils.findField(handle.getClass(),"connection");
+                if(field!=null){
+                    field.setAccessible(true);
+                    ReflectionUtils.setField(field,handle,connection);
+                }
+            }
+        }
+
     }
 
     private void reset() throws Exception{
@@ -104,6 +130,19 @@ public class MonitorSQLInMethodProcessor {
         return obj;
     }
 
+    private Field findDataSourceField(Class<?> clazz){
+        if(clazz==null){
+            return null;
+        }
+        Field[] fs = clazz.getDeclaredFields();
+        for (Field f : fs) {
+            if(isDataSource(f.getType())){
+                return f;
+            }
+        }
+        return findDataSourceField(clazz.getSuperclass());
+    }
+
 
     private boolean isDataSource(Class<?> clazz){
         if(clazz==null){
@@ -125,7 +164,10 @@ public class MonitorSQLInMethodProcessor {
         return false;
     }
 
-    private void dynamicReplaceDataSourceBean(DataSource dataSource) throws Exception{
+    /*
+        一个类型的bean可能有多个，所以应根据对象实际用到的bean来做代理
+     */
+    private void dynamicReplaceDataSourceBean(Collection<DataSource> dataSources) throws Exception{
 
         if(modifyFields!=null && !modifyFields.isEmpty()){
             for (Table.Cell<Field, Object,Object> entry : modifyFields.cellSet()) {
@@ -144,24 +186,42 @@ public class MonitorSQLInMethodProcessor {
             }
             //考虑代理
             value = getTarget(value);
-            Field[] fs = value.getClass().getDeclaredFields();
-            for (Field f : fs) {
-                Class<?> cls = f.getType();
-                if(isDataSource(cls)){
-                    if("DataSource".equalsIgnoreCase(cls.getSimpleName())){
-                        Object proxyDataSource = Proxy.newProxyInstance(MonitorSQLInMethodProcessor.class.getClassLoader(),new Class<?>[]{DataSource.class},new ProxyDataSource(dataSource));
-                        f.setAccessible(true);
-                        f.set(value,proxyDataSource);
-                        modifyFields.put(f,value,proxyDataSource);
-                    }else{
+            Field field = findDataSourceField(value.getClass());
+            if(field!=null){
+                field.setAccessible(true);
+                if("DataSource".equalsIgnoreCase(field.getType().getSimpleName())){
+
+                    Object origin = field.get(value);
+                    if(origin!=null){
+                        for (DataSource dataSource : dataSources) {
+                            if(dataSource == origin){
+                                Object proxyDataSource = Proxy.newProxyInstance(MonitorSQLInMethodProcessor.class.getClassLoader(),new Class<?>[]{DataSource.class},new ProxyDataSource(dataSource));
+                                originalFields.put(field,value,origin);
+                                field.set(value,proxyDataSource);
+                                modifyFields.put(field,value,proxyDataSource);
+                                break;
+                            }
+                        }
+
+                    }
+
+
+                }else{
+                    Object origin = field.get(value);
+                    if(origin!=null){
                         //用cglib解决类型转换问题
-                        Enhancer enhancer = new Enhancer();
-                        enhancer.setSuperclass(cls);
-                        enhancer.setCallback(new ProxyDataSourceInterceptor(dataSource));
-                        Object obj = enhancer.create();
-                        f.setAccessible(true);
-                        f.set(value,obj);
-                        modifyFields.put(f,value,obj);
+                        for (DataSource dataSource : dataSources) {
+                            if(dataSource==origin){
+                                Enhancer enhancer = new Enhancer();
+                                enhancer.setSuperclass(field.getType());
+                                enhancer.setCallback(new ProxyDataSourceInterceptor(dataSource));
+                                Object obj = enhancer.create();
+                                originalFields.put(field,value,origin);
+                                field.set(value,obj);
+                                modifyFields.put(field,value,obj);
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -184,6 +244,10 @@ public class MonitorSQLInMethodProcessor {
         public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
             String methodName = method.getName();
             if("getConnection".equalsIgnoreCase(methodName)){
+                MonitorSQLInMethodFactor factor = FactorContext.threadLocalForFactor.get();
+                if(factor==null){
+                    return method.invoke(dataSource,args);
+                }
                 Connection conn = (Connection) method.invoke(dataSource,args);
                 ProxyConnection connection = new ProxyConnection(conn);
                 return Proxy.newProxyInstance(MonitorSQLInMethodProcessor.class.getClassLoader(),new Class[]{Connection.class},connection);
@@ -204,9 +268,13 @@ public class MonitorSQLInMethodProcessor {
         public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
 
             String methodName = method.getName();
+            MonitorSQLInMethodFactor factor = FactorContext.threadLocalForFactor.get();
+            if(factor==null){
+                return method.invoke(connection,args);
+            }
             if("prepareStatement".equalsIgnoreCase(methodName)){
                 String sql = (String)args[0];
-                MonitorSQLInMethodFactor factor = FactorContext.threadLocalForFactor.get();
+
                 MonitorSQLInMethodFactor.SqlInfo sqlInfo = new MonitorSQLInMethodFactor.SqlInfo();
                 sqlInfo.setSql(sql);
                 factor.getSqlInfoList().offer(sqlInfo);
@@ -315,6 +383,10 @@ public class MonitorSQLInMethodProcessor {
             String methodName = method.getName();
 
             if("getConnection".equalsIgnoreCase(methodName)){
+                MonitorSQLInMethodFactor factor = FactorContext.threadLocalForFactor.get();
+                if(factor==null){
+                    return method.invoke(dataSource,objects);
+                }
                 Object conn = method.invoke(dataSource,objects);
                 if(Modifier.isFinal(conn.getClass().getModifiers())){
                     //使用JDK代理
@@ -330,7 +402,7 @@ public class MonitorSQLInMethodProcessor {
         }
     }
 
-    public static class ProxyConnectionInterceptor implements MethodInterceptor{
+    public static class ProxyConnectionInterceptor implements MethodInterceptor {
 
         private Connection connection;
 
@@ -380,7 +452,7 @@ public class MonitorSQLInMethodProcessor {
         }
     }
 
-    public static class ProxyPreparedStatementInterceptor implements MethodInterceptor{
+    public static class ProxyPreparedStatementInterceptor implements MethodInterceptor {
 
         private PreparedStatement preparedStatement;
 
@@ -424,7 +496,7 @@ public class MonitorSQLInMethodProcessor {
         }
     }
 
-    public static class ProxyStatementInterceptor implements MethodInterceptor{
+    public static class ProxyStatementInterceptor implements MethodInterceptor {
 
         private Statement statement;
 
