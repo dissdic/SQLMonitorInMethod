@@ -49,12 +49,11 @@ public class MonitorSQLInMethodProcessor {
 
     @Around("@annotation(com.monitorSQLInMethod.MonitorSQLInMethod)")
     public Object around(ProceedingJoinPoint point) throws Throwable{
-        System.out.println("start");
         Collection<DataSource> cs = applicationContext.getBeansOfType(DataSource.class).values();
         if(cs.size()==0){
             return point.proceed();
         }
-        //替换掉
+
         dynamicReplaceDataSourceBean(cs);
 
         processConnectionHandle(cs);
@@ -76,10 +75,9 @@ public class MonitorSQLInMethodProcessor {
         reset();
         long stopMs = System.currentTimeMillis();
         factor.setInvokeDuration(stopMs-startMs);
-        //触发一个spring事件，让用户自己处理
+
         MonitorSQLInMethodEvent event = new MonitorSQLInMethodEvent(factor);
         applicationContext.publishEvent(event);
-        System.out.println("stop");
         return obj;
     }
 
@@ -90,7 +88,6 @@ public class MonitorSQLInMethodProcessor {
                 ConnectionHandle handle = conHolder.getConnectionHandle();
                 Connection conn = handle.getConnection();
                 Connection connection = (Connection) Proxy.newProxyInstance(MonitorSQLInMethodProcessor.class.getClassLoader(),new Class<?>[]{Connection.class},new ProxyConnection(conn));
-                //反射设置
                 Field field = ReflectionUtils.findField(handle.getClass(),"connection");
                 if(field!=null){
                     field.setAccessible(true);
@@ -184,7 +181,7 @@ public class MonitorSQLInMethodProcessor {
             if(value instanceof MonitorSQLInMethodProcessor){
                 continue;
             }
-            //考虑代理
+
             value = getTarget(value);
             Field field = findDataSourceField(value.getClass());
             if(field!=null){
@@ -209,7 +206,7 @@ public class MonitorSQLInMethodProcessor {
                 }else{
                     Object origin = field.get(value);
                     if(origin!=null){
-                        //用cglib解决类型转换问题
+
                         for (DataSource dataSource : dataSources) {
                             if(dataSource==origin){
                                 Enhancer enhancer = new Enhancer();
