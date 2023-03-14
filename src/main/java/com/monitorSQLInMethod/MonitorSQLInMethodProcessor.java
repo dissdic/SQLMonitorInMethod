@@ -28,8 +28,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.Statement;
 import java.time.OffsetDateTime;
-import java.util.Collection;
-import java.util.Deque;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 @Aspect
@@ -53,7 +52,7 @@ public class MonitorSQLInMethodProcessor {
         if(cs.size()==0){
             return point.proceed();
         }
-
+        Map<Object,Object> beforeMap = TransactionSynchronizationManager.getResourceMap();
         dynamicReplaceDataSourceBean(cs);
 
         processConnectionHandle(cs);
@@ -73,6 +72,21 @@ public class MonitorSQLInMethodProcessor {
         Object obj = point.proceed();
 
         reset();
+
+        Set<Object> keys = new HashSet<>();
+        Set<Object> beforeKeys = beforeMap.keySet();
+        Map<Object,Object> afterMap = TransactionSynchronizationManager.getResourceMap();
+        Set<Object> afterKeys = afterMap.keySet();
+        for (Object o : beforeKeys) {
+            if(!afterKeys.contains(o)){
+                keys.add(o);
+            }
+        }
+
+        for(Object key:keys){
+            TransactionSynchronizationManager.bindResource(key,new Object());
+        }
+
         long stopMs = System.currentTimeMillis();
         factor.setInvokeDuration(stopMs-startMs);
 
@@ -177,12 +191,12 @@ public class MonitorSQLInMethodProcessor {
         singleton.setAccessible(true);
         ConcurrentHashMap<String, Object> singletonObjects = (ConcurrentHashMap<String, Object>)singleton.get(beanFactory);
 
-        for (Object value : singletonObjects.values()) {
-            if(value instanceof MonitorSQLInMethodProcessor){
+        for (Object originalValue : singletonObjects.values()) {
+            if(originalValue instanceof MonitorSQLInMethodProcessor){
                 continue;
             }
 
-            value = getTarget(value);
+            Object value = getTarget(originalValue);
             Field field = findDataSourceField(value.getClass());
             if(field!=null){
                 field.setAccessible(true);
@@ -190,35 +204,24 @@ public class MonitorSQLInMethodProcessor {
 
                     Object origin = field.get(value);
                     if(origin!=null){
-                        for (DataSource dataSource : dataSources) {
-                            if(dataSource == origin){
-                                Object proxyDataSource = Proxy.newProxyInstance(MonitorSQLInMethodProcessor.class.getClassLoader(),new Class<?>[]{DataSource.class},new ProxyDataSource(dataSource));
-                                originalFields.put(field,value,origin);
-                                field.set(value,proxyDataSource);
-                                modifyFields.put(field,value,proxyDataSource);
-                                break;
-                            }
-                        }
-
+                        Object proxyDataSource = Proxy.newProxyInstance(MonitorSQLInMethodProcessor.class.getClassLoader(),new Class<?>[]{DataSource.class},new ProxyDataSource((DataSource) origin));
+                        originalFields.put(field,value,origin);
+                        field.set(value,proxyDataSource);
+                        modifyFields.put(field,value,proxyDataSource);
                     }
 
 
                 }else{
                     Object origin = field.get(value);
                     if(origin!=null){
+                        Enhancer enhancer = new Enhancer();
+                        enhancer.setSuperclass(field.getType());
+                        enhancer.setCallback(new ProxyDataSourceInterceptor((DataSource) origin));
+                        Object obj = enhancer.create();
+                        originalFields.put(field,value,origin);
+                        field.set(value,obj);
+                        modifyFields.put(field,value,obj);
 
-                        for (DataSource dataSource : dataSources) {
-                            if(dataSource==origin){
-                                Enhancer enhancer = new Enhancer();
-                                enhancer.setSuperclass(field.getType());
-                                enhancer.setCallback(new ProxyDataSourceInterceptor(dataSource));
-                                Object obj = enhancer.create();
-                                originalFields.put(field,value,origin);
-                                field.set(value,obj);
-                                modifyFields.put(field,value,obj);
-                                break;
-                            }
-                        }
                     }
                 }
             }

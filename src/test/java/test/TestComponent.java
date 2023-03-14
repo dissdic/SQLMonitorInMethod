@@ -5,15 +5,18 @@ import com.zaxxer.hikari.HikariDataSource;
 import org.jcp.xml.dsig.internal.dom.ApacheTransform;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceUtils;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionStatus;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionCallback;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
+import java.sql.SQLException;
 import java.util.concurrent.Callable;
 
 @Component
@@ -25,19 +28,24 @@ public class TestComponent {
     @Autowired
     private JdbcTemplate jdbcTemplate;
 
+    @Autowired
+    private DataSource dataSource;
+
+    public void query() throws SQLException {
+        Connection connection = DataSourceUtils.getConnection(jdbcTemplate.getDataSource());
+        PreparedStatement preparedStatement = connection.prepareStatement("select * from work limit 10");
+        preparedStatement.execute();
+    }
 
     public void normalQuery(){
         jdbcTemplate.queryForList("select * from work limit 88");
     }
 
     @MonitorSQLInMethod
-    public void testQuery(){
+    public void testQuery() throws Exception{
         System.out.println("run");
-        jdbcTemplate.queryForList("select * from work limit 100");
-        jdbcTemplate.queryForList("select * from work limit 120");
-        jdbcTemplate.queryForList("select * from work limit 140");
-        jdbcTemplate.queryForList("select * from work limit 160");
-
+        query();
+        query();
 //        jdbcTemplate.execute("insert into work (id) values (1119)");
     }
 

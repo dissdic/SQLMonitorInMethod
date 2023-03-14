@@ -33,7 +33,11 @@ public class TestConfig {
     @Bean
     public JdbcTemplate jdbcTemplate(DataSource dataSource){
 
-        return new JdbcTemplate(dataSource);
+        Enhancer enhancer = new Enhancer();
+        enhancer.setCallback(new DataSourceInterceptor(dataSource));
+        enhancer.setSuperclass(DataSource.class);
+
+        return new JdbcTemplate((DataSource) enhancer.create());
     }
 
     @Bean
@@ -45,6 +49,7 @@ public class TestConfig {
         enhancer.setSuperclass(DataSource.class);
 
         dataSourceTransactionManager.setDataSource((DataSource) enhancer.create());
+//        dataSourceTransactionManager.setDataSource(dataSource);
         return dataSourceTransactionManager;
     }
 
